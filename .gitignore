@@ -1,0 +1,8 @@
+__pycache__/*
+.DS_Store
+fddbenchmark.egg-info/*
+build/*
+data/*
+**/.ipynb_checkpoints/*
+**/__pycache__/*
+.vscode/*
