@@ -1,47 +1,62 @@
+from typing import Optional
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
 
 
-class FDDDataloader():
+class FDDDataloader:
     def __init__(
-        self, 
-        dataframe: pd.DataFrame, 
-        mask: pd.Series, 
-        labels: pd.Series,
-        window_size: int, 
-        step_size: int, 
-        minibatch_training=False, 
-        batch_size=0, 
-        shuffle=False,
-        random_state=None,
-    ):
-        assert batch_size if minibatch_training else True
+            self,
+            dataframe: pd.DataFrame,
+            mask: pd.Series,
+            labels: pd.Series,
+            window_size: int,
+            dilation: int,
+            step_size: int = 1,
+            use_minibatches: bool = False,
+            batch_size: Optional[int] = None,
+            shuffle: bool = False,
+            random_state: Optional[int] = None,
+    ) -> None:
+        if dataframe.index.names != ['run_id', 'sample']:
+            raise ValueError("``dataframe`` must have multi-index ('run_id', 'sample')")
+
+        if not np.all(dataframe.index == mask.index) or not np.all(dataframe.index == labels.index):
+            raise ValueError("``dataframe`` and ``labels`` must have the same indices.")
+
+        if step_size > window_size:
+            raise ValueError("``step_size`` must be less or equal to ``window_size``.")
+
+        if use_minibatches and batch_size is None:
+            raise ValueError("If you set ``use_minibatches=True``, "
+                             "you must set ``batch_size`` to a positive number.")
+
         self.df = dataframe
         self.labels = labels
-        assert np.all(self.labels.index == self.df.index)
         self.window_size = window_size
+        self.dilation = dilation
         self.step_size = step_size
-        assert self.step_size <= self.window_size
-        sample_seq = []
-        runs = self.labels[mask].index.get_level_values(0).unique()
-        for run_id in tqdm(
-            runs, 
-            desc='Creating sequence of samples'):
-            _idx = self.labels.index.get_locs([run_id])
-            sample_seq.extend(
-                np.arange(_idx.min(), _idx.max() - self.window_size + 1, self.step_size)
-            )
+
+        window_end_indices = []
+        run_ids = dataframe[mask].index.get_level_values(0).unique()
+        for run_id in tqdm(run_ids, desc='Creating sequence of samples'):
+            indices = np.array(dataframe.index.get_locs([run_id]))
+            indices = indices[self.window_size - 1:]
+            indices = indices[::step_size]
+            indices = indices[mask.iloc[indices].to_numpy(dtype=bool)]
+            window_end_indices.extend(indices)
+
         if random_state is not None:
             np.random.seed(random_state)
-        self.sample_seq = np.random.permutation(sample_seq) if shuffle else np.array(sample_seq)
-        n_samples = len(sample_seq)
-        batch_seq = list(range(0, n_samples, batch_size)) if minibatch_training else [0]
-        if batch_seq[-1] < n_samples: 
-            batch_seq.append(n_samples)
-        self.n_batches = len(batch_seq) - 1
+
+        self.window_end_indices = np.random.permutation(window_end_indices) if shuffle else np.array(window_end_indices)
+
+        n_samples = len(window_end_indices)
+        batch_seq = list(range(0, n_samples, batch_size)) if use_minibatches else [0]
+        batch_seq.append(n_samples)
         self.batch_seq = np.array(batch_seq)
-    
+        self.n_batches = len(batch_seq) - 1
+
     def __len__(self):
         return self.n_batches
     
@@ -51,25 +66,15 @@ class FDDDataloader():
 
     def __next__(self):
         if self.iter < self.n_batches:
-            # preparing batch of labels
-            sample_ids = self.sample_seq[self.batch_seq[self.iter]:self.batch_seq[self.iter+1]]
-            row_idx = np.tile(sample_ids[:, None], (1, self.window_size)) + np.arange(self.window_size)
-            row_isna = np.isnan(self.labels.values[row_idx]).min(axis=1)
-            labels_batch = np.zeros(row_isna.shape[0])
-            labels_batch[row_isna] = np.nan
-            if ~row_isna.any():
-                # maximum label reduction: if at least a single value is fault
-                # then the entire sample is fault
-                labels_batch[~row_isna] = self.labels.values[row_idx][~row_isna].max(axis=1)
-            # an index of a sample is an index of the last time stamp in the sample
-            index_batch = self.labels.index[row_idx.max(axis=1)]
-            labels_batch = pd.Series(labels_batch, name='labels', index=index_batch)
-            # preparing batch of time series
-            row_idx = np.tile(row_idx[..., None], (1, 1, self.df.shape[1]))
-            col_idx = np.arange(self.df.shape[1])[None, None, :]
-            col_idx = np.tile(col_idx, (row_idx.shape[0], self.window_size, 1))
-            ts_batch = self.df.values[row_idx, col_idx]
+            ends_indices = self.window_end_indices[self.batch_seq[self.iter]:self.batch_seq[self.iter + 1]]
+            windows_indices = ends_indices[:, None] - np.arange(0, self.window_size, self.dilation)[::-1]
+
+            ts_batch = self.df.values[windows_indices]  # (batch_size, window_size, ts_dim)
+            labels_batch = self.labels.values[ends_indices]
+            index_batch = self.labels.index[ends_indices]
+
             self.iter += 1
-            return ts_batch, labels_batch.index, labels_batch
+
+            return ts_batch, labels_batch, index_batch
         else:
             raise StopIteration
