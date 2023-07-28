@@ -3,7 +3,7 @@ from tqdm import tqdm
 import zipfile
 import requests
 import pandas as pd
-
+import gdown
 
 class FDDDataset():
     def __init__(self, name: str,):
@@ -22,6 +22,19 @@ class FDDDataset():
             self.load_file_by_name(self.name)
         elif self.name == "lessmeier_bearing":
             self.load_file_by_name("lessmeier_bearing_4n1of20")
+    
+    def load_lessmeier_bearing(self, filename: str):
+        url = 'https://drive.google.com/uc?id=1_EUMOPtTATJsJOZ0OIiUL6Kg5RimzzwI'
+        zfile_path = f'data/{filename}.zip'
+        if not os.path.exists(zfile_path):
+            gdown.download(url, output, quiet=False)
+        extracting_files(zfile_path, ref_path)
+        self.df = read_csv_pgbar(ref_path + 'dataset.csv', index_col=['run_id', 'sample'])
+        self.labels = read_csv_pgbar(ref_path + 'labels.csv', index_col=['run_id', 'sample'])['labels']
+        train_mask = read_csv_pgbar(ref_path + 'train_mask.csv', index_col=['run_id', 'sample'])['train_mask']
+        test_mask = read_csv_pgbar(ref_path + 'test_mask.csv', index_col=['run_id', 'sample'])['test_mask']
+        self.train_mask = train_mask.astype('boolean')
+        self.test_mask = test_mask.astype('boolean')
         
     def load_file_by_name(self, filename: str):
         ref_path = 'data/' + filename + '/'
