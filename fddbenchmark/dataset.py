@@ -24,6 +24,9 @@ class FDDDataset():
             self.load_lessmeier_bearing(self.name)
     
     def load_lessmeier_bearing(self, filename: str):
+        ref_path = 'data/' + filename + '/'
+        if not os.path.exists(ref_path):
+            os.makedirs(ref_path)        
         url = 'https://drive.google.com/uc?id=1_EUMOPtTATJsJOZ0OIiUL6Kg5RimzzwI'
         zfile_path = f'data/{filename}.zip'
         if not os.path.exists(zfile_path):
