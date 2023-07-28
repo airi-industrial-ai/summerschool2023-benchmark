@@ -2,6 +2,8 @@ from typing import Optional, Literal
 import numpy as np
 from tqdm import tqdm
 
+from sklearn.preprocessing import StandardScaler
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -14,19 +16,21 @@ from .base import FaultDetectionModel
 Scoring = Literal['reconstruction_error', 'importance_sampling']
 
 
-class FaultDetectionLSTMVAE(FaultDetectionModel, nn.Module):
+class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
     def __init__(
             self,
             input_dim: int,
             hidden_dim: int,
             latent_dim: int,
             beta: float = 0.1,
-            scoring: Scoring = 'importance_sampling',
+            scoring: Scoring = 'reconstruction_error',
             device: str = 'cuda',
     ) -> None:
         super().__init__()
 
-        self.enсoder = nn.LSTM(input_dim, hidden_dim, batch_first=True)
+        self.scaler = StandardScaler()
+
+        self.encoder = nn.LSTM(input_dim, hidden_dim, batch_first=True)
         self.fc_mean = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
         self.decoder = nn.LSTM(latent_dim, hidden_dim, batch_first=True)
@@ -37,6 +41,14 @@ class FaultDetectionLSTMVAE(FaultDetectionModel, nn.Module):
 
         self.to(device)
         self.device = device
+    
+    def _fit_scaler(self, train_dataloader: FDDDataloader) -> None:
+        x = np.concatenate([x for x, _, _ in train_dataloader])
+        x = x.reshape(len(x), -1)
+        self.scaler.fit(x)
+    
+    def _scale(self, x: np.ndarray) -> np.ndarray:
+        return self.scaler.transform(x.reshape(len(x), -1)).reshape(x.shape)
 
     def fit(
             self,
@@ -45,6 +57,8 @@ class FaultDetectionLSTMVAE(FaultDetectionModel, nn.Module):
             lr: float,
             log_dir: Optional[str] = None
     ) -> None:
+        self._fit_scaler(train_dataloader)
+
         self.train()
         optimizer = torch.optim.Adam(self.parameters(), lr)
         logger = SummaryWriter(log_dir) if log_dir is not None else None
@@ -54,7 +68,8 @@ class FaultDetectionLSTMVAE(FaultDetectionModel, nn.Module):
                 epoch_logs = {'recon_loss': [], 'kl': [], 'total_loss': []}
 
             for x, _, _ in tqdm(train_dataloader, desc=f'Epoch {epoch}, training loop'):
-                x = torch.tensor(x, device=self.device)  # (batch_size, window_size, input_dim)
+                x = self._scale(x)
+                x = torch.tensor(x, dtype=torch.float32, device=self.device)  # (batch_size, window_size, input_dim)
 
                 optimizer.zero_grad()
 
@@ -106,7 +121,8 @@ class FaultDetectionLSTMVAE(FaultDetectionModel, nn.Module):
         """
         self.eval()
 
-        x = torch.tensor(x, device=self.device)  # (batch_size, window_size, input_dim)
+        x = self._scale(x)
+        x = torch.tensor(x, dtype=torch.float32, device=self.device)  # (batch_size, window_size, input_dim)
 
         encoder_outputs, (_, _), = self.encoder(x)  # (batch_size, window_size, hidden_dim)
         mean = self.fc_mean(encoder_outputs)  # (batch_size, window_size, latent_dim)

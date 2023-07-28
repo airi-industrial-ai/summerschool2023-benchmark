@@ -21,11 +21,7 @@ class FaultDetectionPCA(FaultDetectionModel):
         self.scoring = scoring
 
     def fit(self, train_dataloader: FDDDataloader) -> None:
-        if train_dataloader.n_batches > 1:
-            raise RuntimeError("Training of FaultDetectionPCA requires "
-                               "a whole dataset instead of minibatches.")
-
-        (x, _, _), = iter(train_dataloader)  # (dataset_size, window_size, input_dim)
+        x = np.concatenate([x for x, _, _ in train_dataloader])  # (dataset_size, window_size, input_dim)
         x = x.reshape(len(x), -1)  # (dataset_size, window_size * input_dim)
 
         x = self.scaler.fit_transform(x)
