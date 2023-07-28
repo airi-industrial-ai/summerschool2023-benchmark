@@ -10,7 +10,7 @@ Sensor data represented as the dataset is used for creating the dataloader. The 
 
 ## Datasets
 
-FDDBenchmark provides three datasets:
+FDDBenchmark provides theese datasets:
 1. `rieth_tep`. Dataset of Tennessee Eastman Process based on the dataset _Rieth, C. A., Amsel, B. D., Tran, R., & Cook, M. B. (2017). Additional Tennessee Eastman Process Simulation Data for Anomaly Detection Evaluation (Version V1) [Computer software]. Harvard Dataverse. https://doi.org/10.7910/DVN/6C3JR1_
 2. `reinartz_tep`. Dataset of Tennessee Eastman Process based on the paper _Reinartz, C., Kulahci, M., & Ravn, O. (2021). An extended Tennessee Eastman simulation dataset for fault-detection and decision support systems. Computers & Chemical Engineering, 149, 107281_. The dataset can be found in https://web.mit.edu/braatzgroup/links.html.
 3. `small_tep`. Cropped version of `rieth_tep`.
