@@ -27,7 +27,7 @@ class FDDDataset():
         url = 'https://drive.google.com/uc?id=1_EUMOPtTATJsJOZ0OIiUL6Kg5RimzzwI'
         zfile_path = f'data/{filename}.zip'
         if not os.path.exists(zfile_path):
-            gdown.download(url, output, quiet=False)
+            gdown.download(url, zfile_path, quiet=False)
         extracting_files(zfile_path, ref_path)
         self.df = read_csv_pgbar(ref_path + 'dataset.csv', index_col=['run_id', 'sample'])
         self.labels = read_csv_pgbar(ref_path + 'labels.csv', index_col=['run_id', 'sample'])['labels']
