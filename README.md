@@ -44,7 +44,7 @@ Evaluation metrics can be divided into three groups: detection metrics, diagnosi
 FDDBenchmark can be installed using pip as follows:
 
 ```
-pip install git+https://github.com/airi-industrial-ai/fddbenchmark
+pip install git+https://github.com/airi-industrial-ai/summerschool2023-benchmark
 ```
 
 ## Examples
