@@ -1,5 +1,7 @@
 from typing import Optional, Literal
+from pathlib import Path
 import numpy as np
+import math
 from tqdm import tqdm
 
 from sklearn.preprocessing import StandardScaler
@@ -24,6 +26,7 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
             latent_dim: int,
             beta: float = 0.1,
             scoring: Scoring = 'reconstruction_error',
+            num_important_samples: int = 1000,
             device: str = 'cuda',
     ) -> None:
         super().__init__()
@@ -38,6 +41,7 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
 
         self.beta = beta
         self.scoring = scoring
+        self.num_important_samples = num_important_samples
 
         self.to(device)
         self.device = device
@@ -54,14 +58,29 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
             self,
             train_dataloader: FDDDataloader,
             num_epochs: int,
-            lr: float,
+            warmup_epochs: float = 0.01,
+            lr: float = 3e-4,
             log_dir: Optional[str] = None
     ) -> None:
         self._fit_scaler(train_dataloader)
 
         self.train()
+
         optimizer = torch.optim.Adam(self.parameters(), lr)
-        logger = SummaryWriter(log_dir) if log_dir is not None else None
+        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, lr, epochs=num_epochs,
+            steps_per_epoch=len(train_dataloader),
+            pct_start=warmup_epochs
+        )
+
+        if log_dir is not None:
+            log_dir = Path(log_dir)
+            existing_versions = [int(path.name.split('_')[1]) for path in log_dir.glob('version_*')]
+            version = max(existing_versions) + 1 if existing_versions else 0
+            logger = SummaryWriter(log_dir / f'version_{version}')
+        else:
+            logger = None
+
         global_step = 0
         for epoch in range(num_epochs):
             if logger is not None:
@@ -77,14 +96,14 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
                 encoder_outputs, (_, _), = self.encoder(x)  # (batch_size, window_size, hidden_dim)
                 mean = self.fc_mean(encoder_outputs)  # (batch_size, window_size, latent_dim)
                 std = torch.exp(self.fc_logvar(encoder_outputs) / 2)  # (batch_size, window_size, latent_dim)
-                q = torch.distributions.Normal(mean, std)
-                p = torch.distributions.Normal(torch.zeros_like(mean), torch.ones_like(std))
-                decoder_outputs, (_, _) = self.decoder(q.rsample())
+                q_z = torch.distributions.Normal(mean, std)
+                p_z = torch.distributions.Normal(torch.zeros_like(mean), torch.ones_like(std))
+                decoder_outputs, (_, _) = self.decoder(q_z.rsample())
                 decoder_outputs = self.head(decoder_outputs)
 
                 # loss
                 recon_loss = F.mse_loss(decoder_outputs, x)
-                kl = torch.distributions.kl_divergence(q, p).mean()
+                kl = torch.distributions.kl_divergence(q_z, p_z).mean()
                 loss = recon_loss + self.beta * kl
 
                 if logger is not None:
@@ -97,8 +116,11 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
                         logger.add_scalar(f'train/{k}_step', v, global_step)
                         epoch_logs[k].append(v)
 
+                    logger.add_scalar('lr', lr_scheduler.get_last_lr()[0], global_step)
+
                 loss.backward()
                 optimizer.step()
+                lr_scheduler.step()
 
                 global_step += 1
 
@@ -135,6 +157,23 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
             recon_error = recon_error.data.cpu().numpy()
             return recon_error
         elif self.scoring == 'importance_sampling':
-            raise NotImplementedError
+            batch_size, window_size, latent_dim = mean.shape
+            num_samples = self.num_important_samples
+
+            q_z = torch.distributions.Normal(mean, std)
+            p_z = torch.distributions.Normal(torch.zeros_like(mean), torch.ones_like(std))
+            z = q_z.sample(torch.Size([num_samples]))  # (num_samples, batch_size, window_size, latent_dim)
+
+            decoder_outputs, (_, _) = self.decoder(z.reshape(-1, window_size, latent_dim))
+            decoder_outputs = self.head(decoder_outputs)  # (num_samples * batch_size, window_size, input_dim)
+            decoder_outputs = decoder_outputs.reshape(num_samples, batch_size, window_size, -1)
+            recon_errors = F.mse_loss(decoder_outputs, x, reduction='none').mean(dim=(2, 3))  # (num_samples, batch_size)
+
+            nll = -torch.logsumexp(
+                -recon_errors
+                + p_z.log_prob(z).mean(dim=(2, 3))
+                - q_z.log_prob(z).mean(dim=(2, 3))
+            )
+            nll += math.log(num_samples)
         else:
             raise NotImplementedError(f"Scoring rule {self.scoring} is not supported.")
