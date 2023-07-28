@@ -21,7 +21,7 @@ class FDDDataset():
         if self.name in ['small_tep', 'reinartz_tep', 'rieth_tep']:
             self.load_file_by_name(self.name)
         elif self.name == "lessmeier_bearing":
-            self.load_file_by_name("lessmeier_bearing_4n1of20")
+            self.load_lessmeier_bearing(self.name)
     
     def load_lessmeier_bearing(self, filename: str):
         url = 'https://drive.google.com/uc?id=1_EUMOPtTATJsJOZ0OIiUL6Kg5RimzzwI'
