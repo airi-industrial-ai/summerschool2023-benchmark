@@ -6,7 +6,7 @@ from fddbenchmark.dataloader import FDDDataloader
 from .base import FaultDetectionModel
 
 
-class FaultDetectionPCA(FaultDetectionModel):
+class FaultDetectionIsolationForest(FaultDetectionModel):
     def __init__(self) -> None:
         super().__init__()
 

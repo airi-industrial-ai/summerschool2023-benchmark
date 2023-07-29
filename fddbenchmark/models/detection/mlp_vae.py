@@ -2,6 +2,7 @@ from typing import Optional, Literal
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
+import math
 
 from sklearn.preprocessing import StandardScaler
 
@@ -25,8 +26,6 @@ class FaultDetectionMLPVAE(nn.Module, FaultDetectionModel):
             hidden_dim: int,
             latent_dim: int,
             beta: float = 0.1,
-            scoring: Scoring = 'reconstruction_error',
-            num_mc_samples: int = 1000,
             device: str = 'cuda',
     ) -> None:
         super().__init__()
@@ -35,21 +34,25 @@ class FaultDetectionMLPVAE(nn.Module, FaultDetectionModel):
 
         self.encoder = nn.Sequential(
             nn.Linear(input_dim * window_size, hidden_dim),
-            # nn.BatchNorm1d(hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
         )
         self.fc_mean = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            # nn.BatchNorm1d(hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, input_dim * window_size)
         )
 
         self.beta = beta
-        self.scoring = scoring
-        self.num_mc_samples = num_mc_samples
 
         self.to(device)
         self.device = device
@@ -68,7 +71,8 @@ class FaultDetectionMLPVAE(nn.Module, FaultDetectionModel):
             num_epochs: int,
             warmup_epochs: float = 0.01,
             lr: float = 3e-4,
-            log_dir: Optional[str] = None
+            log_dir: Optional[str] = None,
+            verbose: int = 1,
     ) -> None:
         self._fit_scaler(train_dataloader)
 
@@ -95,7 +99,7 @@ class FaultDetectionMLPVAE(nn.Module, FaultDetectionModel):
             if logger is not None:
                 epoch_logs = {'recon_loss': [], 'kl': [], 'total_loss': []}
 
-            for x, _, _ in tqdm(train_dataloader, desc=f'Epoch {epoch}, training loop'):
+            for x, _, _ in tqdm(train_dataloader, desc=f'Epoch {epoch}, training loop', disable=verbose == 0):
                 x = x.reshape(len(x), -1)
                 x = self.scaler.transform(x)
                 x = torch.tensor(x, dtype=torch.float32, device=self.device)  # (batch_size, window_size * input_dim)
@@ -142,7 +146,13 @@ class FaultDetectionMLPVAE(nn.Module, FaultDetectionModel):
             torch.save(self.state_dict(), log_dir / 'last.pt')
 
     @torch.no_grad()
-    def predict(self, x: np.ndarray) -> np.ndarray:
+    def predict(
+            self,
+            x: np.ndarray,
+            scoring: Literal['reconstruction_error', 'importance_sampling'] = 'reconstruction_error',
+            num_mc_samples: int = 1000,
+            std_x: float = 1.0
+    ) -> np.ndarray:
         """Predicts anomaly score for each time series window in a given batch.
 
         Args:
@@ -160,13 +170,31 @@ class FaultDetectionMLPVAE(nn.Module, FaultDetectionModel):
         x = torch.tensor(x, dtype=torch.float32, device=self.device)  # (batch_size, window_size * input_dim)
 
         encoder_outputs = self.encoder(x)  # (batch_size, hidden_dim)
-        mean = self.fc_mean(encoder_outputs)  # (batch_size, window_size, latent_dim)
+        mean = self.fc_mean(encoder_outputs)  # (batch_size, latent_dim)
+        std = torch.exp(self.fc_logvar(encoder_outputs) / 2)  # (batch_size, latent_dim)
 
-        match self.scoring:
+        match scoring:
             case 'reconstruction_error':
                 decoder_outputs = self.decoder(mean)  # (batch_size, window_size * input_dim)
                 recon_error = F.mse_loss(decoder_outputs, x, reduction='none').mean(dim=1)
                 recon_error = recon_error.data.cpu().numpy()
                 return recon_error
+            case 'importance_sampling':
+                q_z = torch.distributions.Normal(mean, std)
+                p_z = torch.distributions.Normal(torch.zeros_like(mean), torch.ones_like(std))
+
+                z = q_z.sample(torch.Size([num_mc_samples]))  # (num_samples, batch_size, latent_dim)
+
+                decoder_outputs = self.decoder(z.flatten(0, 1)).reshape(num_mc_samples, *x.shape)
+                p_x = torch.distributions.Normal(decoder_outputs, std_x)
+
+                nll = math.log(num_mc_samples) - torch.logsumexp(
+                    p_x.log_prob(x).mean(dim=2)
+                    + p_z.log_prob(z).mean(dim=2)
+                    - q_z.log_prob(z).mean(dim=2),
+                    dim=0
+                )
+                nll = nll.data.cpu().numpy()
+                return nll
             case _:
-                raise NotImplementedError(f"Scoring rule {self.scoring} is not supported.")
+                raise NotImplementedError(f"Scoring rule {scoring} is not supported.")

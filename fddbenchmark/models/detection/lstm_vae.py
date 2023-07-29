@@ -3,7 +3,6 @@ from pathlib import Path
 import numpy as np
 import math
 from tqdm import tqdm
-import pickle
 
 from sklearn.preprocessing import StandardScaler
 
@@ -28,8 +27,6 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
             num_lstm_layers: int = 1,
             bidirectional: bool = True,
             beta: float = 0.1,
-            scoring: Scoring = 'reconstruction_error',
-            num_mc_samples: int = 1000,
             device: str = 'cuda',
     ) -> None:
         super().__init__()
@@ -46,8 +43,6 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
         self.head = nn.Linear(factor * hidden_dim, input_dim)
 
         self.beta = beta
-        self.scoring = scoring
-        self.num_mc_samples = num_mc_samples
 
         self.to(device)
         self.device = device
@@ -139,7 +134,13 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
             torch.save(self.state_dict(), log_dir / 'last.pt')
 
     @torch.no_grad()
-    def predict(self, x: np.ndarray, std_x: float = 1.0) -> np.ndarray:
+    def predict(
+            self,
+            x: np.ndarray,
+            scoring: Literal['reconstruction_error', 'importance_sampling'] = 'reconstruction_error',
+            num_mc_samples: int = 1000,
+            std_x: float = 1.0
+    ) -> np.ndarray:
         """Predicts anomaly score for each time series window in a given batch.
 
         Args:
@@ -159,7 +160,7 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
         mean = self.fc_mean(encoder_outputs)  # (batch_size, window_size, latent_dim)
         std = torch.exp(self.fc_logvar(encoder_outputs) / 2)  # (batch_size, window_size, latent_dim)
 
-        match self.scoring:
+        match scoring:
             case 'reconstruction_error':
                 decoder_outputs = self.head(self.decoder(mean)[0])  # (batch_size, window_size, input_dim)
                 recon_error = F.mse_loss(decoder_outputs, x, reduction='none').mean(dim=(1, 2))
@@ -169,12 +170,12 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
                 q_z = torch.distributions.Normal(mean, std)
                 p_z = torch.distributions.Normal(torch.zeros_like(mean), torch.ones_like(std))
 
-                z = q_z.sample(torch.Size([self.num_mc_samples]))  # (num_samples, batch_size, window_size, latent_dim)
+                z = q_z.sample(torch.Size([num_mc_samples]))  # (num_samples, batch_size, window_size, latent_dim)
 
-                decoder_outputs = self.head(self.decoder(z.flatten(0, 1))[0]).reshape(self.num_mc_samples, *x.shape)
+                decoder_outputs = self.head(self.decoder(z.flatten(0, 1))[0]).reshape(num_mc_samples, *x.shape)
                 p_x = torch.distributions.Normal(decoder_outputs, std_x)
 
-                nll = math.log(self.num_mc_samples) - torch.logsumexp(
+                nll = math.log(num_mc_samples) - torch.logsumexp(
                     p_x.log_prob(x).mean(dim=(2, 3))
                     + p_z.log_prob(z).mean(dim=(2, 3))
                     - q_z.log_prob(z).mean(dim=(2, 3)),
@@ -183,4 +184,4 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
                 nll = nll.data.cpu().numpy()
                 return nll
             case _:
-                raise NotImplementedError(f"Scoring rule {self.scoring} is not supported.")
+                raise NotImplementedError(f"Scoring rule {scoring} is not supported.")
