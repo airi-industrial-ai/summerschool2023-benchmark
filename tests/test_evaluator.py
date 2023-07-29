@@ -1,6 +1,9 @@
-from fddbenchmark import FDDDataset, FDDDataloader, FDDEvaluator
+from fddbenchmark.dataset import FDDDataset
+from fddbenchmark.dataloader import FDDDataloader
+from fddbenchmark.evaluator import  FDDEvaluator
 import numpy as np
 import pandas as pd
+
 
 def test_small_tep():
     dataset = FDDDataset(name='small_tep')
@@ -10,20 +13,20 @@ def test_small_tep():
         dataset.labels,
         window_size=100,
         step_size=1,
-        minibatch_training=True,
+        use_minibatches=True,
         batch_size=1024,
     )
     
     np.random.seed(0)
     pred = []
     label = []
-    for ts, time_index, _label in loader:
+    for ts, _label, time_index in loader:
         _pred = np.random.randint(21, size=time_index.shape[0])
         pred.append(pd.Series(_pred, index=time_index, dtype=int))
-        label.append(_label)
+        label.append(pd.Series(_label, index=time_index, dtype=int))
     pred = pd.concat(pred)
     label = pd.concat(label)
-    
+
     evaluator = FDDEvaluator(
         step_size=loader.step_size
     )

@@ -1,4 +1,5 @@
-from fddbenchmark import FDDDataset
+from fddbenchmark.dataset import FDDDataset
+
 
 def test_small_tep():
     dataset = FDDDataset(name='small_tep')

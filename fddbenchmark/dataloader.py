@@ -11,7 +11,7 @@ class FDDDataloader:
             mask: pd.Series,
             labels: pd.Series,
             window_size: int,
-            dilation: int,
+            dilation: int = 1,
             step_size: int = 1,
             use_minibatches: bool = False,
             batch_size: Optional[int] = None,

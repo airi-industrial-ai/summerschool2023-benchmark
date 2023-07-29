@@ -1,9 +1,7 @@
 from typing import Optional, Literal
 from pathlib import Path
 import numpy as np
-import math
 from tqdm import tqdm
-import pickle
 
 from sklearn.preprocessing import StandardScaler
 
@@ -19,14 +17,13 @@ from .base import FaultDetectionModel
 Scoring = Literal['reconstruction_error', 'importance_sampling']
 
 
-class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
+class FaultDetectionMLPVAE(nn.Module, FaultDetectionModel):
     def __init__(
             self,
             input_dim: int,
+            window_size: int,
             hidden_dim: int,
             latent_dim: int,
-            num_lstm_layers: int = 1,
-            bidirectional: bool = True,
             beta: float = 0.1,
             scoring: Scoring = 'reconstruction_error',
             num_mc_samples: int = 1000,
@@ -36,14 +33,19 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
 
         self.scaler = StandardScaler()
 
-        factor = 2 if bidirectional else 1
-        self.encoder = nn.LSTM(input_dim, hidden_dim, num_lstm_layers,
-                               batch_first=True, bidirectional=bidirectional)
-        self.fc_mean = nn.Linear(factor * hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(factor * hidden_dim, latent_dim)
-        self.decoder = nn.LSTM(latent_dim, hidden_dim, num_lstm_layers,
-                               batch_first=True, bidirectional=bidirectional)
-        self.head = nn.Linear(factor * hidden_dim, input_dim)
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim * window_size, hidden_dim),
+            # nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+        )
+        self.fc_mean = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            # nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim * window_size)
+        )
 
         self.beta = beta
         self.scoring = scoring
@@ -94,18 +96,19 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
                 epoch_logs = {'recon_loss': [], 'kl': [], 'total_loss': []}
 
             for x, _, _ in tqdm(train_dataloader, desc=f'Epoch {epoch}, training loop'):
-                x = self._scale(x)
-                x = torch.tensor(x, dtype=torch.float32, device=self.device)  # (batch_size, window_size, input_dim)
+                x = x.reshape(len(x), -1)
+                x = self.scaler.transform(x)
+                x = torch.tensor(x, dtype=torch.float32, device=self.device)  # (batch_size, window_size * input_dim)
 
                 optimizer.zero_grad()
 
                 # forward pass
-                encoder_outputs = self.encoder(x)[0]  # (batch_size, window_size, hidden_dim)
-                mean = self.fc_mean(encoder_outputs)  # (batch_size, window_size, latent_dim)
-                std = torch.exp(self.fc_logvar(encoder_outputs) / 2)  # (batch_size, window_size, latent_dim)
+                encoder_outputs = self.encoder(x)  # (batch_size, hidden_dim)
+                mean = self.fc_mean(encoder_outputs)  # (batch_size, latent_dim)
+                std = torch.exp(self.fc_logvar(encoder_outputs) / 2)  # (batch_size, latent_dim)
                 q_z = torch.distributions.Normal(mean, std)
                 p_z = torch.distributions.Normal(torch.zeros_like(mean), torch.ones_like(std))
-                decoder_outputs = self.head(self.decoder(q_z.rsample())[0])
+                decoder_outputs = self.decoder(q_z.rsample())
 
                 # loss
                 recon_loss = F.mse_loss(decoder_outputs, x)
@@ -139,7 +142,7 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
             torch.save(self.state_dict(), log_dir / 'last.pt')
 
     @torch.no_grad()
-    def predict(self, x: np.ndarray, std_x: float = 1.0) -> np.ndarray:
+    def predict(self, x: np.ndarray) -> np.ndarray:
         """Predicts anomaly score for each time series window in a given batch.
 
         Args:
@@ -152,35 +155,18 @@ class FaultDetectionLSTMVAE(nn.Module, FaultDetectionModel):
         """
         self.eval()
 
-        x = self._scale(x)
-        x = torch.tensor(x, dtype=torch.float32, device=self.device)  # (batch_size, window_size, input_dim)
+        x = x.reshape(len(x), -1)
+        x = self.scaler.transform(x)
+        x = torch.tensor(x, dtype=torch.float32, device=self.device)  # (batch_size, window_size * input_dim)
 
-        encoder_outputs = self.encoder(x)[0]  # (batch_size, window_size, hidden_dim)
+        encoder_outputs = self.encoder(x)  # (batch_size, hidden_dim)
         mean = self.fc_mean(encoder_outputs)  # (batch_size, window_size, latent_dim)
-        std = torch.exp(self.fc_logvar(encoder_outputs) / 2)  # (batch_size, window_size, latent_dim)
 
         match self.scoring:
             case 'reconstruction_error':
-                decoder_outputs = self.head(self.decoder(mean)[0])  # (batch_size, window_size, input_dim)
-                recon_error = F.mse_loss(decoder_outputs, x, reduction='none').mean(dim=(1, 2))
+                decoder_outputs = self.decoder(mean)  # (batch_size, window_size * input_dim)
+                recon_error = F.mse_loss(decoder_outputs, x, reduction='none').mean(dim=1)
                 recon_error = recon_error.data.cpu().numpy()
                 return recon_error
-            case 'importance_sampling':
-                q_z = torch.distributions.Normal(mean, std)
-                p_z = torch.distributions.Normal(torch.zeros_like(mean), torch.ones_like(std))
-
-                z = q_z.sample(torch.Size([self.num_mc_samples]))  # (num_samples, batch_size, window_size, latent_dim)
-
-                decoder_outputs = self.head(self.decoder(z.flatten(0, 1))[0]).reshape(self.num_mc_samples, *x.shape)
-                p_x = torch.distributions.Normal(decoder_outputs, std_x)
-
-                nll = math.log(self.num_mc_samples) - torch.logsumexp(
-                    p_x.log_prob(x).mean(dim=(2, 3))
-                    + p_z.log_prob(z).mean(dim=(2, 3))
-                    - q_z.log_prob(z).mean(dim=(2, 3)),
-                    dim=0
-                )
-                nll = nll.data.cpu().numpy()
-                return nll
             case _:
                 raise NotImplementedError(f"Scoring rule {self.scoring} is not supported.")
