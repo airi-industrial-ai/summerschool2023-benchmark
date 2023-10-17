@@ -66,15 +66,18 @@ class FDDDataloader:
 
     def __next__(self):
         if self.iter < self.n_batches:
-            ends_indices = self.window_end_indices[self.batch_seq[self.iter]:self.batch_seq[self.iter + 1]]
-            windows_indices = ends_indices[:, None] - np.arange(0, self.window_size, self.dilation)[::-1]
-
-            ts_batch = self.df.values[windows_indices]  # (batch_size, window_size, ts_dim)
-            labels_batch = self.labels.values[ends_indices]
-            index_batch = self.labels.index[ends_indices]
-
+            ts_batch, index_batch, labels_batch = self.__getitem__(self.iter)
             self.iter += 1
-
-            return ts_batch, labels_batch, index_batch
+            return ts_batch, index_batch, labels_batch
         else:
             raise StopIteration
+
+    def __getitem__(self, idx):
+        ends_indices = self.window_end_indices[self.batch_seq[idx]:self.batch_seq[idx + 1]]
+        windows_indices = ends_indices[:, None] - np.arange(0, self.window_size, self.dilation)[::-1]
+
+        ts_batch = self.df.values[windows_indices]  # (batch_size, window_size, ts_dim)
+        labels_batch = self.labels.values[ends_indices]
+        index_batch = self.labels.index[ends_indices]
+
+        return ts_batch, index_batch, labels_batch
